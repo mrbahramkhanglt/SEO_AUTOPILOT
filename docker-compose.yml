@@ -1,0 +1,129 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seo}
+      POSTGRES_DB: ${POSTGRES_DB:-seo_autopilot}
+      POSTGRES_SSL: ${POSTGRES_SSL:-off}
+      POSTGRES_SSL_MIN_PROTOCOL: ${POSTGRES_SSL_MIN_PROTOCOL:-TLSv1.2}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./certs/postgres:/certs:ro
+      - ./docker/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /var/lib/postgresql/ssl
+        cp /certs/server.crt /var/lib/postgresql/ssl/server.crt
+        cp /certs/server.key /var/lib/postgresql/ssl/server.key
+        cp /certs/ca.crt /var/lib/postgresql/ssl/ca.crt
+        chown -R postgres:postgres /var/lib/postgresql/ssl
+        chmod 600 /var/lib/postgresql/ssl/server.key
+        chmod 644 /var/lib/postgresql/ssl/server.crt /var/lib/postgresql/ssl/ca.crt
+        SSL_MODE="$${POSTGRES_SSL:-off}"
+        if [ "$$SSL_MODE" = "true" ] || [ "$$SSL_MODE" = "on" ] || [ "$$SSL_MODE" = "1" ]; then
+          SSL_MODE=on
+        else
+          SSL_MODE=off
+        fi
+        exec docker-entrypoint.sh postgres           -c hba_file=/etc/postgresql/pg_hba.conf           -c ssl=$$SSL_MODE           -c ssl_cert_file=/var/lib/postgresql/ssl/server.crt           -c ssl_key_file=/var/lib/postgresql/ssl/server.key           -c ssl_ca_file=/var/lib/postgresql/ssl/ca.crt           -c ssl_min_protocol_version=$${POSTGRES_SSL_MIN_PROTOCOL:-TLSv1.2}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seo} -d ${POSTGRES_DB:-seo_autopilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    profiles: ["postgres"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      # Set PGADMIN_ENABLE_TLS=True and mount certs (see docs/PGADMIN.md)
+      PGADMIN_ENABLE_TLS: ${PGADMIN_ENABLE_TLS:-}
+    ports:
+      # HTTP (default): host 5050 -> 80
+      # HTTPS when TLS enabled: map host port to 443 (e.g. PGADMIN_PORT=5050 and use 443 inside)
+      - "${PGADMIN_PORT:-5050}:${PGADMIN_CONTAINER_PORT:-80}"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      # Mount when using TLS (create via scripts/generate-pgadmin-certs.sh)
+      - ./certs/pgadmin/server.cert:/certs/server.cert:ro
+      - ./certs/pgadmin/server.key:/certs/server.key:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production-set-real-key}
+      DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:////data/seo_autopilot.db}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      API_URL: ${API_URL:-http://localhost:8000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - backend_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend-pg:
+    profiles: ["postgres"]
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production-set-real-key}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://seo:seo@postgres:5432/seo_autopilot}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      API_URL: ${API_URL:-http://localhost:8000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  postgres_data:
+  pgadmin_data:
